@@ -42,10 +42,11 @@ An **NVIDIA GPU** — the app will not run on CPU.
 2. Open **---Command Prompt---** and type:
 
    ---Command Prompt---
-   nvidia-smi
+   
    ```
+   nvidia-smi
 
-   If you see driver information — you’re good to go ✅
+If you see driver information — you’re good to go ✅
 
 ---
 
@@ -63,13 +64,14 @@ An **NVIDIA GPU** — the app will not run on CPU.
 
 After installation, open **---Command Prompt---** and verify:
 
----Command Prompt---
-nvcc --version
-```
+   ---Command Prompt---
+   
+      ```
+         nvcc --version
 
 You should see something like `release 12.1`.
 
----
+
 
 ### 🥉 Step 3: Install cuDNN (for CUDA 12.x)
 
@@ -111,24 +113,29 @@ python --version
 2. Create a virtual environment (optional but recommended):
 
    ---Command Prompt---
+
+  
+
+   ```
    python -m venv venv
    venv\Scripts\activate
-   ```
 
-3. Install dependencies:
+4. Install dependencies:
 
    ---Command Prompt---
+      ```
    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
    pip install faster-whisper numpy librosa pydub ttkthemes
-   ```
 
-4. Confirm GPU support:
+
+5. Confirm GPU support:
 
    ---Command Prompt---
-   python -c "import torch; print(torch.cuda.is_available())"
+  
    ```
+    python -c "import torch; print(torch.cuda.is_available())"
 
-   ✅ If it says `True`, CUDA is ready!
+✅ If it says `True`, CUDA is ready!
 
 ---
 
