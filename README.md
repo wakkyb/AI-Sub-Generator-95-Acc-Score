@@ -66,7 +66,6 @@ After installation, open **---Command Prompt---** and verify:
 
    ---Command Prompt---
    
-      ```
          nvcc --version
 
 You should see something like `release 12.1`.
@@ -101,10 +100,9 @@ You should see something like `release 12.1`.
 To verify Python:
 
 ---Command Prompt---
-python --version
-```
 
----
+      python --version
+
 
 ### 🪄 Step 5: Install the Required Libraries
 
@@ -148,9 +146,8 @@ python --version
 To verify:
 
 ---Command Prompt---
-ffmpeg -version
-```
-
+   
+      ffmpeg -version
 ---
 
 ## 🚀 How to Run the App
@@ -159,8 +156,9 @@ ffmpeg -version
 2. Run:
 
    ---Command Prompt---
-   python subtitle_generator.py
+  
    ```
+    python subtitle_generator.py
 3. The app window will open 🎉
 
 🟢 **To use it:**
