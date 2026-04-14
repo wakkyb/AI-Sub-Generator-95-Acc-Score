@@ -212,7 +212,7 @@ You’ll see progress bars for each file as they’re processed.
 ## ❤️ Credits
 
 Developed by Wakkyb (devwakky@gmail.com) with 🧠 Whisper AI + ⚡ CUDA GPU acceleration
-Built for anyone who want **fast, offline, free, accurate subtitles**.
+Built for anyone who wants **fast, offline, free, accurate subtitles**.
 
 ---
 
