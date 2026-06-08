@@ -19,16 +19,16 @@ from faster_whisper import WhisperModel
 MIN_SILENCE_LEN_MS = 300   # Minimum silence duration (ms)
 SILENCE_THRESH_DB = -45    # Threshold for silence (dB)
 SPEECH_PAD_MS = 100        # Padding around speech chunks
-SPEECH_GROUP_GAP_MS = 200  # Gap threshold to split speech groups
+SPEECH_GROUP_GAP_MS = 200  # Gap threshold to split lengthy speech
 
-# Music Detection
+# Music Detection - default 2 sec
 MUSIC_MIN_LEN_SEC = 2.0
 
-# Subtitle Formatting
+# Subtitle Length Formatting
 MAX_CHARS_PER_LINE = 60
 MAX_LINES_PER_SUB = 2
 
-# Whisper Config
+# Whisper Config. Large v3 works fine but you can finetune per need
 WHISPER_MODEL = "large-v3"
 if torch.cuda.is_available():
     COMPUTE_DEVICE = "cuda"
@@ -52,7 +52,7 @@ def format_timestamp(seconds):
 
 
 def is_music(y, sr):
-    """Heuristic to check if a segment is likely music."""
+    """Heuristictly check if a segment is likely music."""
     if len(y) < 2048:
         return False
     y_harmonic, _ = librosa.effects.hpss(y)
