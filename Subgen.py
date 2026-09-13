@@ -1,8 +1,10 @@
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import queue
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import torch
@@ -13,23 +15,62 @@ from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
 from faster_whisper import WhisperModel
 
+def show_crash_popup(title, error_message):
+    """Show a GUI error popup even if the main Tkinter loop hasn't started or is torn down."""
+    try:
+        err_root = tk.Tk()
+        err_root.withdraw()
+        messagebox.showerror(title, error_message)
+        err_root.destroy()
+    except Exception:
+        # Fallback to standard output if Tkinter cannot initialize
+        print(f"[{title}] {error_message}", file=sys.stderr)
+
+def handle_exception(exc_type, exc_value, exc_traceback):
+    """Global exception hook to show a popup whenever an unhandled exception occurs."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    # If SystemExit with code 0, exit gracefully without showing error
+    if issubclass(exc_type, SystemExit):
+        if exc_value.code in (0, None):
+            return
+        msg = f"Process exited with code {exc_value.code}"
+        show_crash_popup("Process Exited with Error", msg)
+        return
+
+    tb_lines = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    show_crash_popup("Application Crash", f"An unhandled error occurred:\n\n{tb_lines}")
+
+sys.excepthook = handle_exception
+
+# Also handle unhandled exceptions inside threads (Python 3.8+)
+if hasattr(threading, 'excepthook'):
+    def handle_thread_exception(args):
+        if issubclass(args.exc_type, SystemExit) and args.exc_value.code in (0, None):
+            return
+        tb_lines = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        show_crash_popup("Thread Error", f"An unhandled error occurred in thread '{args.thread.name}':\n\n{tb_lines}")
+    threading.excepthook = handle_thread_exception
+
 # ---------------- Configuration ----------------
 
 # Silence Detection
 MIN_SILENCE_LEN_MS = 300   # Minimum silence duration (ms)
-SILENCE_THRESH_DB = -45    # Threshold for silence (dB)
+SILENCE_THRESH_DB = -43   # Threshold for silence (dB); lower is better 
 SPEECH_PAD_MS = 100        # Padding around speech chunks
-SPEECH_GROUP_GAP_MS = 200  # Gap threshold to split lengthy speech
+SPEECH_GROUP_GAP_MS = 200  # Gap threshold to split speech groups
 
-# Music Detection - default 2 sec
+# Music Detection
 MUSIC_MIN_LEN_SEC = 2.0
 
-# Subtitle Length Formatting
+# Subtitle Formatting
 MAX_CHARS_PER_LINE = 60
 MAX_LINES_PER_SUB = 2
 
-# Whisper Config. Large v3 works fine but you can finetune per need
-WHISPER_MODEL = "large-v3"
+# Whisper Config
+WHISPER_MODEL = "turbo" #large-v3 for improved accuracy else Turbo
 if torch.cuda.is_available():
     COMPUTE_DEVICE = "cuda"
 else:
@@ -52,7 +93,7 @@ def format_timestamp(seconds):
 
 
 def is_music(y, sr):
-    """Heuristictly check if a segment is likely music."""
+    """Heuristic to check if a segment is likely music."""
     if len(y) < 2048:
         return False
     y_harmonic, _ = librosa.effects.hpss(y)
@@ -110,9 +151,23 @@ class SubtitleProcessor:
                     speech_audio_path = f.name
                 group_audio.export(speech_audio_path, format="wav")
 
-                segments, _ = self.whisper_model.transcribe(speech_audio_path, word_timestamps=True)
+                segments, info = self.whisper_model.transcribe(speech_audio_path, word_timestamps=True)
+                segments_list = list(segments)
 
-                realigned = self.realign_whisper_timestamps(list(segments), group)
+                # If detected language is not English, translate if meaningful speech was found
+                if info.language != "en" and any(s.text.strip() for s in segments_list):
+                    try:
+                        trans_segments, _ = self.whisper_model.transcribe(
+                            speech_audio_path, word_timestamps=True, task="translate"
+                        )
+                        trans_list = list(trans_segments)
+                        if trans_list:
+                            segments_list = trans_list
+                    except Exception:
+                        # Fallback to transcribe segments if translate fails
+                        pass
+
+                realigned = self.realign_whisper_timestamps(segments_list, group)
                 all_realigned_segments.extend(realigned)
                 os.remove(speech_audio_path)
 
@@ -261,7 +316,8 @@ class SubtitleGeneratorApp:
         ctrl.pack(fill=tk.X, pady=8)
         ttk.Label(ctrl, text="Select videos to generate subtitles:", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=5)
         self.file_button = ttk.Button(ctrl, text="📂 Files", command=self.select_files)
-        self.file_button.pack(side=tk.LEFT, padx=5)
+        self.file_button.pack(side=tk.LEFT,
+                              padx=5)
         self.folder_button = ttk.Button(ctrl, text="🗂 Folder", command=self.select_folder)
         self.folder_button.pack(side=tk.LEFT, padx=5)
 
@@ -284,20 +340,26 @@ class SubtitleGeneratorApp:
         self.check_queue()
 
     def select_files(self):
-        ftypes = [("Video Files", "*.mp4 *.mkv *.avi *.mov *.webm"), ("All files", "*.*")]
-        fnames = filedialog.askopenfilenames(title="Select Video Files", filetypes=ftypes)
-        if fnames:
-            self.start_processing(list(fnames))
+        try:
+            ftypes = [("Video Files", "*.mp4 *.mkv *.avi *.mov *.webm"), ("All files", "*.*")]
+            fnames = filedialog.askopenfilenames(title="Select Video Files", filetypes=ftypes)
+            if fnames:
+                self.start_processing(list(fnames))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to select files:\n{e}")
 
     def select_folder(self):
-        folder = filedialog.askdirectory(title="Select Video Folder")
-        if folder:
-            exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm')
-            files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(exts)]
-            if not files:
-                messagebox.showinfo("No Videos Found", "No supported video files in folder.")
-                return
-            self.start_processing(files)
+        try:
+            folder = filedialog.askdirectory(title="Select Video Folder")
+            if folder:
+                exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm')
+                files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(exts)]
+                if not files:
+                    messagebox.showinfo("No Videos Found", "No supported video files in folder.")
+                    return
+                self.start_processing(files)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to select folder:\n{e}")
 
     def start_processing(self, files):
         if self.processing_thread and self.processing_thread.is_alive():
@@ -334,7 +396,9 @@ class SubtitleGeneratorApp:
                 self.progress_queue.put(("file_done", (fp, i + 1)))
             self.progress_queue.put(("all_done", None))
         except Exception as e:
+            err_details = traceback.format_exc()
             self.progress_queue.put(("progress", ("GLOBAL", f"Fatal error: {e}", -1)))
+            self.progress_queue.put(("worker_error", err_details))
             self.progress_queue.put(("all_done", None))
 
     def check_queue(self):
@@ -353,6 +417,8 @@ class SubtitleGeneratorApp:
                             else:
                                 w['pbar']['value'] = val
                                 w['pbar']['style'] = 'green.Horizontal.TProgressbar'
+                elif mtype == "worker_error":
+                    messagebox.showerror("Processing Worker Error", f"A fatal error occurred during processing:\n\n{data}")
                 elif mtype == "file_done":
                     _, count = data
                     self.overall_progress['value'] = count
@@ -385,6 +451,14 @@ def main():
         return
 
     root = ThemedTk(theme="equilux")  # modern dark theme
+
+    # Report Tkinter callback errors via messagebox
+    def report_callback_exception(self, exc, val, tb):
+        err_msg = "".join(traceback.format_exception(exc, val, tb))
+        messagebox.showerror("UI Error", f"An unexpected UI error occurred:\n\n{err_msg}")
+
+    tk.Tk.report_callback_exception = report_callback_exception
+
     style = ttk.Style(root)
 
     style.configure("green.Horizontal.TProgressbar", troughcolor="#2e2e2e", background="#4CAF50")
@@ -395,4 +469,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (0, None):
+            show_crash_popup("Process Exited with Error", f"Process exited with exit code: {e.code}")
+            sys.exit(e.code)
+    except Exception:
+        tb = traceback.format_exc()
+        show_crash_popup("Fatal Crash", f"Fatal crash before or during execution:\n\n{tb}")
+        sys.exit(1)
