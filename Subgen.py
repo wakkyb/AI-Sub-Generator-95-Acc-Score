@@ -105,10 +105,11 @@ def is_music(y, sr):
 # ---------------- Core Processing ----------------
 
 class SubtitleProcessor:
-    def __init__(self, video_path, progress_queue, whisper_model):
+    def __init__(self, video_path, progress_queue, whisper_model, translate_foreign=False):
         self.video_path = video_path
         self.progress_queue = progress_queue
         self.whisper_model = whisper_model
+        self.translate_foreign = translate_foreign
         self.base_name = os.path.splitext(os.path.basename(video_path))[0]
         self.output_srt_path = os.path.join(os.path.dirname(video_path), self.base_name + ".srt")
         self.temp_audio_file = None
@@ -147,6 +148,8 @@ class SubtitleProcessor:
 
                 # Combine audio
                 group_audio = sum(audio[start:end] for start, end in group)
+                group_duration_sec = len(group_audio) / 1000.0
+
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     speech_audio_path = f.name
                 group_audio.export(speech_audio_path, format="wav")
@@ -154,17 +157,31 @@ class SubtitleProcessor:
                 segments, info = self.whisper_model.transcribe(speech_audio_path, word_timestamps=True)
                 segments_list = list(segments)
 
-                # If detected language is not English, translate if meaningful speech was found
-                if info.language != "en" and any(s.text.strip() for s in segments_list):
+                # Translation logic:
+                # 1. Only translate if the user enabled translation in UI.
+                # 2. Only translate if audio chunk has enough duration (>= 1.5s) and language confidence (> 0.5)
+                #    to prevent CTranslate2 C++ integer divide-by-zero crashes (0xC0000094).
+                # 3. Use word_timestamps=False and beam_size=1 during translation because cross-lingual
+                #    word alignment on short segments is the primary source of 0xC0000094.
+                if (
+                    self.translate_foreign
+                    and info.language != "en"
+                    and info.language_probability > 0.5
+                    and group_duration_sec >= 1.5
+                    and any(s.text.strip() for s in segments_list)
+                ):
                     try:
                         trans_segments, _ = self.whisper_model.transcribe(
-                            speech_audio_path, word_timestamps=True, task="translate"
+                            speech_audio_path,
+                            task="translate",
+                            word_timestamps=False,
+                            beam_size=1
                         )
                         trans_list = list(trans_segments)
                         if trans_list:
                             segments_list = trans_list
                     except Exception:
-                        # Fallback to transcribe segments if translate fails
+                        # Fallback to the original transcription segments if translation fails
                         pass
 
                 realigned = self.realign_whisper_timestamps(segments_list, group)
@@ -316,10 +333,18 @@ class SubtitleGeneratorApp:
         ctrl.pack(fill=tk.X, pady=8)
         ttk.Label(ctrl, text="Select videos to generate subtitles:", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=5)
         self.file_button = ttk.Button(ctrl, text="📂 Files", command=self.select_files)
-        self.file_button.pack(side=tk.LEFT,
-                              padx=5)
+        self.file_button.pack(side=tk.LEFT, padx=5)
         self.folder_button = ttk.Button(ctrl, text="🗂 Folder", command=self.select_folder)
         self.folder_button.pack(side=tk.LEFT, padx=5)
+
+        # Translation option
+        self.translate_var = tk.BooleanVar(value=True)
+        self.translate_check = ttk.Checkbutton(
+            ctrl,
+            text="🌐 Translate foreign speech to English",
+            variable=self.translate_var
+        )
+        self.translate_check.pack(side=tk.RIGHT, padx=10)
 
         # Status list
         list_frame = ttk.LabelFrame(main_frame, text="Processing Status", padding="10")
@@ -389,9 +414,15 @@ class SubtitleGeneratorApp:
 
     def process_files_worker(self):
         try:
+            translate_enabled = self.translate_var.get()
             whisper_model = WhisperModel(WHISPER_MODEL, device=COMPUTE_DEVICE, compute_type="auto")
             for i, fp in enumerate(self.file_list):
-                proc = SubtitleProcessor(fp, self.progress_queue, whisper_model)
+                proc = SubtitleProcessor(
+                    fp,
+                    self.progress_queue,
+                    whisper_model,
+                    translate_foreign=translate_enabled
+                )
                 proc.run()
                 self.progress_queue.put(("file_done", (fp, i + 1)))
             self.progress_queue.put(("all_done", None))
@@ -439,6 +470,7 @@ class SubtitleGeneratorApp:
         status = tk.NORMAL if state else tk.DISABLED
         self.file_button.config(state=status)
         self.folder_button.config(state=status)
+        self.translate_check.config(state=status)
 
 
 def main():
