@@ -70,13 +70,18 @@ MAX_CHARS_PER_LINE = 60
 MAX_LINES_PER_SUB = 2
 
 # Whisper Config
-WHISPER_MODEL = "turbo" #large-v3 for improved accuracy else Turbo
+WHISPER_MODEL = "large-v3" #large-v3 for improved accuracy else Turbo
 if torch.cuda.is_available():
     COMPUTE_DEVICE = "cuda"
 else:
     messagebox.showerror("CUDA Error", "CUDA not available. Please run on a system with GPU support. For Nvidia Download and Install CuDnn")
     raise SystemExit(1)
 
+
+# Supported file extensions
+VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.m4v')
+AUDIO_EXTENSIONS = ('.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a', '.wma', '.opus')
+SUPPORTED_MEDIA_EXTENSIONS = VIDEO_EXTENSIONS + AUDIO_EXTENSIONS
 
 # ---------------- Helper Functions ----------------
 
@@ -92,6 +97,11 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 
+def is_audio_file(file_path):
+    """Check if the given file path corresponds to an audio file."""
+    return os.path.splitext(file_path)[1].lower() in AUDIO_EXTENSIONS
+
+
 def is_music(y, sr):
     """Heuristic to check if a segment is likely music."""
     if len(y) < 2048:
@@ -105,22 +115,25 @@ def is_music(y, sr):
 # ---------------- Core Processing ----------------
 
 class SubtitleProcessor:
-    def __init__(self, video_path, progress_queue, whisper_model, translate_foreign=False):
-        self.video_path = video_path
+    def __init__(self, media_path, progress_queue, whisper_model, translate_foreign=False):
+        self.media_path = media_path
+        self.is_audio = is_audio_file(media_path)
         self.progress_queue = progress_queue
         self.whisper_model = whisper_model
         self.translate_foreign = translate_foreign
-        self.base_name = os.path.splitext(os.path.basename(video_path))[0]
-        self.output_srt_path = os.path.join(os.path.dirname(video_path), self.base_name + ".srt")
+        self.base_name = os.path.splitext(os.path.basename(media_path))[0]
+        ext = ".txt" if self.is_audio else ".srt"
+        self.output_path = os.path.join(os.path.dirname(media_path), self.base_name + ext)
         self.temp_audio_file = None
 
     def update_progress(self, message, value=None):
-        self.progress_queue.put(("progress", (self.video_path, message, value)))
+        self.progress_queue.put(("progress", (self.media_path, message, value)))
 
     def run(self):
         try:
-            if os.path.exists(self.output_srt_path):
-                self.update_progress("Skipping (SRT already exists)", 100)
+            target_desc = "TXT" if self.is_audio else "SRT"
+            if os.path.exists(self.output_path):
+                self.update_progress(f"Skipping ({target_desc} already exists)", 100)
                 return
 
             # Step 1: Extract Audio
@@ -134,7 +147,10 @@ class SubtitleProcessor:
             speech_groups, music_regions = self.analyze_audio_regions(audio, y, sr)
 
             if not speech_groups:
-                self.write_srt_file([], music_regions)
+                if self.is_audio:
+                    self.write_txt_file([], music_regions)
+                else:
+                    self.write_srt_file([], music_regions)
                 self.update_progress("No speech detected.", 100)
                 return
 
@@ -188,9 +204,13 @@ class SubtitleProcessor:
                 all_realigned_segments.extend(realigned)
                 os.remove(speech_audio_path)
 
-            # Step 4: Write Subtitles
-            self.update_progress("Writing subtitles...", 95)
-            self.write_srt_file(all_realigned_segments, music_regions)
+            # Step 4: Write Output File
+            if self.is_audio:
+                self.update_progress("Writing transcript...", 95)
+                self.write_txt_file(all_realigned_segments, music_regions)
+            else:
+                self.update_progress("Writing subtitles...", 95)
+                self.write_srt_file(all_realigned_segments, music_regions)
             self.update_progress("Done ✅", 100)
 
         except Exception as e:
@@ -203,7 +223,7 @@ class SubtitleProcessor:
         temp_dir = tempfile.gettempdir()
         temp_audio_path = os.path.join(temp_dir, self.base_name + ".wav")
         command = [
-            'ffmpeg', '-i', self.video_path, '-vn', '-acodec', 'pcm_s16le',
+            'ffmpeg', '-i', self.media_path, '-vn', '-acodec', 'pcm_s16le',
             '-ar', '16000', '-ac', '1', '-y', temp_audio_path
         ]
         startupinfo = None
@@ -282,7 +302,7 @@ class SubtitleProcessor:
             items.append({'start': s, 'end': e, 'text': '♪'})
         items.sort(key=lambda x: x['start'])
 
-        with open(self.output_srt_path, 'w', encoding='utf-8') as f:
+        with open(self.output_path, 'w', encoding='utf-8') as f:
             count = 1
             for item in items:
                 if not item['text']:
@@ -313,13 +333,29 @@ class SubtitleProcessor:
                     f.write(line_group.strip() + "\n\n")
                     count += 1
 
+    def write_txt_file(self, segments, music_regions):
+        items = []
+        for seg in segments:
+            items.append({'start': seg['start'], 'end': seg['end'], 'text': seg['text'].strip()})
+        for s, e in music_regions:
+            items.append({'start': s, 'end': e, 'text': '[Music]'})
+        items.sort(key=lambda x: x['start'])
+
+        with open(self.output_path, 'w', encoding='utf-8') as f:
+            for item in items:
+                if not item['text']:
+                    continue
+                start_str = format_timestamp(item['start'])
+                end_str = format_timestamp(item['end'])
+                f.write(f"[{start_str} --> {end_str}] {item['text']}\n")
+
 
 # ---------------- GUI ----------------
 
 class SubtitleGeneratorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("AI Subtitle Generator (GPU) by Wakkyb")
+        self.root.title("AI Subtitle & Speech-to-Text Generator (GPU) by Wakkyb")
         self.root.geometry("900x650")
         self.file_list = []
         self.progress_queue = queue.Queue()
@@ -331,7 +367,7 @@ class SubtitleGeneratorApp:
         # Controls
         ctrl = ttk.Frame(main_frame)
         ctrl.pack(fill=tk.X, pady=8)
-        ttk.Label(ctrl, text="Select videos to generate subtitles:", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=5)
+        ttk.Label(ctrl, text="Select media files (video or audio):", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=5)
         self.file_button = ttk.Button(ctrl, text="📂 Files", command=self.select_files)
         self.file_button.pack(side=tk.LEFT, padx=5)
         self.folder_button = ttk.Button(ctrl, text="🗂 Folder", command=self.select_folder)
@@ -366,8 +402,13 @@ class SubtitleGeneratorApp:
 
     def select_files(self):
         try:
-            ftypes = [("Video Files", "*.mp4 *.mkv *.avi *.mov *.webm"), ("All files", "*.*")]
-            fnames = filedialog.askopenfilenames(title="Select Video Files", filetypes=ftypes)
+            ftypes = [
+                ("Media Files (Video & Audio)", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.m4v *.mp3 *.wav *.aac *.flac *.ogg *.m4a *.wma *.opus"),
+                ("Audio Files", "*.mp3 *.wav *.aac *.flac *.ogg *.m4a *.wma *.opus"),
+                ("Video Files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.m4v"),
+                ("All files", "*.*")
+            ]
+            fnames = filedialog.askopenfilenames(title="Select Media Files (Video or Audio)", filetypes=ftypes)
             if fnames:
                 self.start_processing(list(fnames))
         except Exception as e:
@@ -375,12 +416,14 @@ class SubtitleGeneratorApp:
 
     def select_folder(self):
         try:
-            folder = filedialog.askdirectory(title="Select Video Folder")
+            folder = filedialog.askdirectory(title="Select Media Folder")
             if folder:
-                exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm')
-                files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(exts)]
+                files = [
+                    os.path.join(folder, f) for f in os.listdir(folder)
+                    if f.lower().endswith(SUPPORTED_MEDIA_EXTENSIONS)
+                ]
                 if not files:
-                    messagebox.showinfo("No Videos Found", "No supported video files in folder.")
+                    messagebox.showinfo("No Media Found", "No supported video or audio files found in folder.")
                     return
                 self.start_processing(files)
         except Exception as e:
